@@ -1,0 +1,11 @@
+{
+  "name": "md",
+  "version": "0.1.0",
+  "description": "Read, write and review markdown with Claude in a pane inside Claude Code: drafts stream in, comments stay on their words, and Claude suggests edits you accept or reject.",
+  "author": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
+  "homepage": "https://github.com/davekiss/md",
+  "repository": "https://github.com/davekiss/md",
+  "license": "MIT",
+  "keywords": ["markdown", "writing", "review", "editor", "mod"],
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "md",
+  "owner": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
+  "plugins": [
+    {
+      "name": "md",
+      "source": "./",
+      "description": "Read, write and review markdown with Claude in a pane inside Claude Code."
+    }
+  ]
+}
