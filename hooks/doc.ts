@@ -100,6 +100,56 @@ export function docLabel(path: string | null): string {
   return path ?? 'the unsaved draft in the md pane (edit it with mcp__md__edit)'
 }
 
+export type SpanKind = 'mark' | 'bold' | 'italic' | 'code' | 'link' | 'bullet'
+
+// How a line of markdown reads styled: [from, to) columns and what they are.
+// Syntax characters are `mark`, drawn faint, so the words come forward while
+// the markdown stays visible and editable
+export function inlineSpans(line: string): [number, number, SpanKind][] {
+  const spans: [number, number, SpanKind][] = []
+  // Columns already claimed, so code isn't read as emphasis and so on
+  const taken = new Array<boolean>(line.length).fill(false)
+  const free = (from: number, to: number) => taken.slice(from, to).every(t => !t)
+  const claim = (from: number, to: number, kind: SpanKind) => {
+    spans.push([from, to, kind])
+    taken.fill(true, from, to)
+  }
+  const lead = /^(#{1,6}\s+|\s*>+\s?|\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)/.exec(line)?.[0] ?? ''
+  if (lead) claim(0, lead.length, /^\s*(?:[-*+]|\d+[.)])\s/.test(lead) ? 'bullet' : 'mark')
+  const each = (re: RegExp, on: (m: RegExpExecArray) => void) => {
+    for (const m of line.matchAll(re)) if (free(m.index, m.index + m[0].length)) on(m as RegExpExecArray)
+  }
+  each(/(`+)(.+?)\1/g, m => {
+    const tick = m[1]?.length ?? 1
+    claim(m.index, m.index + tick, 'mark')
+    claim(m.index + tick, m.index + m[0].length - tick, 'code')
+    claim(m.index + m[0].length - tick, m.index + m[0].length, 'mark')
+  })
+  each(/!?\[([^\]]+)\]\(([^)]*)\)/g, m => {
+    const open = m[0].startsWith('!') ? 2 : 1
+    const textEnd = m.index + open + (m[1]?.length ?? 0)
+    claim(m.index, m.index + open, 'mark')
+    claim(m.index + open, textEnd, 'link')
+    claim(textEnd, m.index + m[0].length, 'mark')
+  })
+  const emphasis = (re: RegExp, kind: SpanKind) =>
+    each(re, m => {
+      const d = m[1]?.length ?? 1
+      claim(m.index, m.index + d, 'mark')
+      claim(m.index + d, m.index + m[0].length - d, kind)
+      claim(m.index + m[0].length - d, m.index + m[0].length, 'mark')
+    })
+  emphasis(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, 'bold')
+  emphasis(/(?<![*_\w])([*_])(?=\S)(.+?)(?<=\S)\1(?![*_\w])/g, 'italic')
+  return spans.sort((a, b) => a[0] - b[0])
+}
+
+// Words in a stretch of prose: letters and digits, with apostrophes and
+// hyphens inside a word
+export function countWords(text: string): number {
+  return text.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)?.length ?? 0
+}
+
 // Whether every character of `query` appears in `text` in order, ignoring case
 export function fuzzy(query: string, text: string): boolean {
   const t = text.toLowerCase()

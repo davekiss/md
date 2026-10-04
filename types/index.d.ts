@@ -61,6 +61,8 @@ declare module 'claude-code' {
       /** The line the reader's window starts at; the cursor marks the selected block */
       readTop: number
       toc: boolean
+      /** Focus mode: only the caret's paragraph at full strength, its line kept mid-pane */
+      focus: boolean
     }
   }
 }

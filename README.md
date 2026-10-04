@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0-000" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.2.0-000" alt="Version 0.2.0">
   <img src="https://img.shields.io/badge/Claude%20Code-2.1.288%2B-000" alt="Claude Code 2.1.288+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-000" alt="MIT"></a>
 </p>
@@ -56,6 +56,16 @@ Drag across a phrase, then press **ctrl+j** to ask Claude about it or **ctrl+k**
 
 For your prose, Claude proposes changes instead of making them. The old text is struck through in place and the new text waits underneath. Accept or reject it with a click, or press **Tab** and then **y** or **d**. When you ask for a change outright, Claude makes it directly. Either way it's marked in the gutter and **u** undoes it.
 
+### Made for reading what you wrote
+
+The text sits in a centered column about 72 characters wide, the line length prose reads best at, however wide the pane is. Markdown stays real and editable, but it steps back. `**` and `#` are faint, so **bold** reads bold and *italic* reads italic. Code and links get their own color. The header keeps a live word count, of the whole document or of what you've selected.
+
+Press **z** for focus mode. Every paragraph but the one you're in fades, and your line stays near the middle of the pane as you write.
+
+### Images in the text
+
+An image on its own line shows as a picture in the reader view, and under your line when the caret is on it. Ghostty, kitty and WezTerm draw real pixels. Other terminals with full color, iTerm2 included, get a half-block thumbnail. Previews need macOS, which reads the image with `sips`.
+
 ### Comments stay on their words
 
 Notes are anchored to the text they quote. Edit above them and they move with it. Delete their text and they're marked stale instead of pointing at the wrong line.
@@ -79,6 +89,8 @@ In the text, type to edit. Click to place the caret and drag to select.
 | ctrl+j | Ask Claude about the selection |
 | ctrl+k | Comment on the selection |
 | ctrl+z | Undo |
+| cmd+v | Paste text. A dragged-in image file becomes an image link. |
+| ctrl+v | Paste the image on the clipboard: saved to `assets/` and linked (macOS) |
 | Tab | Move to the pane's buttons |
 
 With the pane's buttons focused:
@@ -88,6 +100,9 @@ With the pane's buttons focused:
 | j / k | Next / previous line |
 | f / b | Page down / up |
 | v | Start or clear a selection |
+| o | Copy the selection, or the whole document, to the clipboard |
+| i | Paste the image on the clipboard |
+| z | Focus mode: fade all but this paragraph, keep your line centered |
 | n | Next comment |
 | c / a | Comment / ask |
 | x | Send all open comments to Claude |
@@ -101,8 +116,9 @@ With the pane's buttons focused:
 
 | Command | Does |
 |---|---|
-| `/md` | Pick a file: recent ones first, then markdown under the current directory. Type to filter. |
+| `/md` | Pick a file: recent ones first, then markdown under the current directory. Type to filter, or choose **+ New file**. |
 | `/md <path>` | Open a file |
+| `/md new [name]` | Create an empty markdown file and open it. Without a name, `untitled.md`. Never overwrites. |
 | `/md save <path>` | Save the draft, or the open file under a new name. Never overwrites another file. |
 
 ## Claude's tools

@@ -3,7 +3,9 @@ import type { On } from 'claude-code'
 
 import {
   changedLines,
+  countWords,
   draftLines,
+  inlineSpans,
   partialString,
   rangesOfQuote,
   reanchor,
@@ -12,6 +14,7 @@ import {
   textBetween,
   wrapSegments,
 } from '../hooks/doc'
+import { fitRows, halfBlocks, imageOfLine } from '../hooks/preview'
 import type { Comment } from '../types'
 
 const FILE = '/repo/notes.md'
@@ -112,6 +115,44 @@ test('ctrl+j in the editor asks about the selection without typing over it', asy
   expect(submitted[0]).toContain('Specifically this text: "para\nsecond"')
   expect(submitted[0]).toContain('tight en')
   await ui.unmount()
+})
+
+test('a paste arrives as one key and lands whole; a dropped image path becomes an image link', async ($, on) => {
+  const file = { text: TEXT }
+  world(on, file)
+  on('fs.exists', () => ({ value: true }))
+  await $.command.run(runMd('notes.md'))
+  const ui = await $.ui.mount({ plugin: 'md', surface: 'terminal', component: 'Pane', requestId: 'md', props: PANE_PROPS })
+  const type = (key: string) => ui.post({ type: 'key', key, shift: false, ctrl: false, meta: false }, { in: 'editor' })
+  await ui.pointer({ type: 'down', x: GUTTER, y: 2, button: 'left', in: 'editor' })
+  await type('pasted\r\nlines ')
+  expect(file.text.split('\n').slice(2, 4)).toEqual(['pasted', 'lines first para'])
+  await type("'/repo/shots/My Shot.png'")
+  expect(file.text).toContain('![My Shot](<shots/My Shot.png>)')
+  await ui.unmount()
+})
+
+test('markdown syntax recedes: markers are faint, the words they mark take the style', () => {
+  const read = (line: string) => inlineSpans(line).map(([a, b, k]) => `${k}:${line.slice(a, b)}`)
+  expect(read('We *consume* and **scroll** `code` [docs](x)')).toEqual([
+    'mark:*', 'italic:consume', 'mark:*', 'mark:**', 'bold:scroll', 'mark:**',
+    'mark:`', 'code:code', 'mark:`', 'mark:[', 'link:docs', 'mark:](x)',
+  ])
+  expect(read('## Heading')).toEqual(['mark:## '])
+  expect(read('- item with `code`')).toEqual(['bullet:- ', 'mark:`', 'code:code', 'mark:`'])
+  expect(read('snake_case_name and 2*3*4')).toEqual([])
+  expect(countWords("It's a well-known fact — two words? Don’t.")).toBe(7)
+})
+
+test('images keep their shape, and transparent pixels leave the terminal showing through', () => {
+  expect(imageOfLine('![A logo](<assets/my logo.png>)')).toEqual({ alt: 'A logo', src: 'assets/my logo.png' })
+  expect(imageOfLine('text ![inline](a.png) text')).toBeNull()
+  expect(fitRows(1600, 900, 60, 20)).toEqual({ columns: 60, rows: 17 })
+  expect(fitRows(512, 512, 60, 20)).toEqual({ columns: 40, rows: 20 })
+  // One column, two pixel rows per cell: red over clear, clear over clear
+  const rgba = Uint8Array.of(255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+  const words = new Uint32Array(Uint8Array.fromBase64(halfBlocks(rgba, 1, 4)).buffer)
+  expect(Array.from(words)).toEqual([0x2580, 0xff0000, 0x01000000, 0x20, 0x01000000, 0x01000000])
 })
 
 test('typing in the editor edits the file, and undo puts it back', async ($, on) => {
@@ -273,10 +314,10 @@ test('/md alone lists recent files first, then markdown under the cwd; typing fi
   await $.command.run(runMd(''))
   const ui = await $.ui.mount({ plugin: 'md', surface: 'terminal', component: 'Pane', requestId: 'md', props: PANE_PROPS })
   const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))
-  expect(labels.slice(0, 3)).toEqual(['later.md  · recent', 'notes.md  · recent', 'docs/guide.md'])
+  expect(labels.slice(0, 4)).toEqual(['+ New file', 'later.md  · recent', 'notes.md  · recent', 'docs/guide.md'])
   expect(labels.some(l => l.includes('node_modules'))).toBe(false)
   await ui.input({ key: 'pick-filter', text: 'gde', kind: 'change' })
-  expect((await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))).toEqual(['docs/guide.md', 'cancel'])
+  expect((await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))).toEqual(['+ New file gde.md', 'docs/guide.md', 'cancel'])
   await ui.input({ key: 'pick-filter', text: 'gde', kind: 'submit' })
   const view = JSON.parse(String(((await $.tool.call({ tool: 'mcp__md__view' } as never)) as { result: string }).result))
   expect(view.path).toBe('/repo/docs/guide.md')

@@ -1,6 +1,6 @@
 {
   "name": "md",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read, write and review markdown with Claude in a pane inside Claude Code: drafts stream in, comments stay on their words, and Claude suggests edits you accept or reject.",
   "author": { "name": "Dave Kiss", "url": "https://github.com/davekiss" },
   "homepage": "https://github.com/davekiss/md",

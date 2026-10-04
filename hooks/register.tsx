@@ -13,6 +13,8 @@ import {
   rangeLabel,
   rangesOfQuote,
   fuzzy,
+  inlineSpans,
+  countWords,
   draftLines,
   partialString,
   readMinutes,
@@ -28,6 +30,8 @@ import {
 } from './doc'
 import type { EditorRow } from './editor'
 import { blockBody } from './blocks'
+import { decodeBmp, fitRows, halfBlocks, hash, imageOfLine } from './preview'
+import type { Preview } from './preview'
 
 const PANE = 'md'
 
@@ -42,6 +46,7 @@ const draftAtom = atom({ plugin: 'md', key: 'draft' } as const, null)
 const writingAtom = atom({ plugin: 'md', key: 'writing' } as const, false)
 const pickerAtom = atom({ plugin: 'md', key: 'picker' } as const, null)
 const suggestionsAtom = atom({ plugin: 'md', key: 'suggestions' } as const, [])
+const focusAtom = atom({ plugin: 'md', key: 'focus' } as const, false)
 const changedAtom = atom({ plugin: 'md', key: 'changed' } as const, [])
 const readerAtom = atom({ plugin: 'md', key: 'reader' } as const, false)
 const tocAtom = atom({ plugin: 'md', key: 'toc' } as const, false)
@@ -71,7 +76,7 @@ function newId(): string {
 }
 
 async function absolute($: EngineInterface, path: string): Promise<string> {
-  const home = $.env.get('HOME') ?? ''
+  const home = (await $.env.get('HOME')) ?? ''
   if (path.startsWith('~/')) return home + path.slice(1)
   if (path.startsWith('/')) return path
   const cwd = await $.session.cwd()
@@ -164,6 +169,21 @@ async function openPicked($: EngineInterface, path: string | null) {
   } catch (err) {
     $.ui.toast(`Could not open ${docName(path)}: ${String(err)}`)
   }
+}
+
+// The markdown file a typed name means: `.md` added when it has no extension
+function markdownName(given: string): string {
+  const name = given.trim() || 'untitled.md'
+  return /\.(md|markdown|mdx)$/i.test(name) ? name : name + '.md'
+}
+
+// Creates an empty markdown file and opens it; a name that exists just opens.
+// With no name, the first free untitled.md, untitled-2.md, ...
+async function newFile($: EngineInterface, given: string) {
+  let path = await absolute($, markdownName(given))
+  if (!given.trim()) for (let i = 2; await $.fs.exists(path); i++) path = await absolute($, `untitled-${i}.md`)
+  if (!(await $.fs.exists(path))) await $.fs.write(path, '')
+  await openPicked($, path)
 }
 
 function docName(path: string | null): string {
@@ -272,6 +292,13 @@ async function keepVisible($: EngineInterface) {
   const cursor = await read($, cursorAtom)
   const rowsOf = (n: number) => wrapSegments(doc.lines[n - 1] ?? '', layout.textWidth).length
   let top = await read($, viewTopAtom)
+  // Focus mode keeps the caret's line near the middle, as a typewriter does
+  if (await read($, focusAtom)) {
+    top = cursor
+    let above = 0
+    while (top > 1 && above + rowsOf(top - 1) <= Math.floor(layout.room / 2)) above += rowsOf(--top)
+    return update($, viewTopAtom, () => top)
+  }
   if (cursor < top) top = cursor
   let used = 0
   for (let n = top; n <= cursor; n++) used += rowsOf(n)
@@ -335,6 +362,18 @@ async function suggestionAtCaret($: EngineInterface): Promise<Suggestion | null>
   return null
 }
 
+// Puts the selection, or the whole document, on the clipboard: copying from
+// the terminal itself would take the gutter and the wrapping along
+async function copyOut($: EngineInterface) {
+  const doc = await read($, docAtom)
+  if (!doc) return
+  const sel = ordered(await read($, markAtom), await caretOf($))
+  const text = sel ? textBetween(doc.lines, sel[0], sel[1]) : doc.lines.join('\n') + '\n'
+  const copied = await $.ui.copy({ text })
+  const what = sel ? 'the selection' : `${docName(doc.path)} (${doc.lines.length} lines)`
+  $.ui.toast(copied.isCopied ? `Copied ${what}` : `Could not copy: ${copied.reason}`)
+}
+
 // Accepts the suggestion on the caret's line, as an edit u undoes, or drops it
 async function settle($: EngineInterface, accept: boolean) {
   const s = await suggestionAtCaret($)
@@ -346,6 +385,66 @@ async function settle($: EngineInterface, accept: boolean) {
   await edit($, span[0], span[1], s.text)
   const after = (await read($, docAtom))?.lines ?? []
   await update($, changedAtom, () => changedLines(doc.lines, after))
+}
+
+// The names a key event uses for keys; any other text longer than one
+// character is a paste
+const KEY_NAMES = new Set(['up', 'down', 'left', 'right', 'return', 'tab', 'backspace', 'delete', 'pageup', 'pagedown', 'home', 'end', 'escape', 'space'])
+
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg)$/i
+
+// Where the open document's images go and how its links name them: next to
+// the file, or under the working directory for a draft
+async function assetsDir($: EngineInterface, doc: Doc): Promise<string> {
+  return doc.path ? doc.path.replace(/\/[^/]*$/, '') : await $.session.cwd()
+}
+
+// A markdown image link for `path`, relative to `dir` when it lies inside it
+function imageLink(dir: string, path: string): string {
+  const target = path.startsWith(dir + '/') ? path.slice(dir.length + 1) : path
+  const alt = (path.split('/').pop() ?? '').replace(IMAGE_FILE, '')
+  return `![${alt}](${/\s/.test(target) ? `<${target}>` : target})`
+}
+
+// Inserts pasted text at the caret over any selection; a dropped image file's
+// path goes in as an image link
+async function paste($: EngineInterface, raw: string) {
+  const doc = await read($, docAtom)
+  if (!doc) return
+  let text = raw.replace(/\r\n?/g, '\n')
+  const dropped = text.trim().replace(/^(['"])(.*)\1$/, '$2').replace(/\\ /g, ' ')
+  if (!dropped.includes('\n') && dropped.startsWith('/') && IMAGE_FILE.test(dropped) && (await $.fs.exists(dropped))) {
+    text = imageLink(await assetsDir($, doc), dropped)
+  }
+  const caret = await caretOf($)
+  const sel = ordered(await read($, markAtom), caret)
+  await edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, text)
+}
+
+// Saves the image on the clipboard as a PNG under assets/ and links it at the
+// caret. A terminal can't paste image data, so this reads the clipboard itself
+async function pasteImage($: EngineInterface) {
+  const doc = await read($, docAtom)
+  if (!doc) return
+  const info = await $.process.run(['osascript', '-e', 'clipboard info']).catch(() => null)
+  if (!info) return $.ui.toast('Pasting images needs macOS (osascript).')
+  if (!info.stdout.includes('PNGf')) return $.ui.toast('No image on the clipboard.')
+  const dir = await assetsDir($, doc)
+  const stem = docName(doc.path).replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'draft'
+  const file = `${dir}/assets/${stem}-${Date.now()}.png`
+  await $.process.run(['mkdir', '-p', `${dir}/assets`])
+  const wrote = await $.process.run([
+    'osascript',
+    '-e', 'set png to (the clipboard as «class PNGf»)',
+    '-e', `set f to open for access POSIX file ${JSON.stringify(file)} with write permission`,
+    '-e', 'write png to f',
+    '-e', 'close access f',
+  ])
+  if (wrote.exitCode !== 0) return $.ui.toast(`Could not save the image: ${wrote.stderr.trim()}`)
+  const caret = await caretOf($)
+  const sel = ordered(await read($, markAtom), caret)
+  await edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, imageLink(dir, file))
+  $.ui.toast(`Saved ${file.slice(dir.length + 1)}`)
 }
 
 // One key typed into the editor: caret moves, selection with shift, edits
@@ -371,7 +470,7 @@ async function editorKey($: EngineInterface, k: { key: string; shift: boolean; c
       if (mode !== 'review') await submitPrompt($, mode, draft)
     } else if (k.key === 'backspace') await update($, draftAtom, () => [...draft].slice(0, -1).join(''))
     else if (k.key === 'space') await update($, draftAtom, () => draft + ' ')
-    else if (!k.ctrl && !k.meta && [...k.key].length === 1) await update($, draftAtom, () => draft + k.key)
+    else if (!k.ctrl && !k.meta && !KEY_NAMES.has(k.key)) await update($, draftAtom, () => draft + k.key.replace(/\s*\n\s*/g, ' '))
     return
   }
   const lines = doc.lines
@@ -407,9 +506,11 @@ async function editorKey($: EngineInterface, k: { key: string; shift: boolean; c
       return edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, ' ')
   }
   if ((k.ctrl || k.meta) && k.key === 'z') return undo($)
+  if (k.ctrl && k.key === 'v') return pasteImage($)
   if (k.ctrl || k.meta) return
   // A printable character
   if ([...k.key].length === 1) return edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, k.key)
+  if (!KEY_NAMES.has(k.key)) return paste($, k.key)
 }
 
 async function writeLines($: EngineInterface, lines: string[]) {
@@ -481,12 +582,92 @@ function relative(path: string, cwd: string): string {
   return path.startsWith(cwd + '/') ? path.slice(cwd.length + 1) : path
 }
 
+// The paragraph a line belongs to: its run of non-blank lines
+function paragraphAround(lines: string[], n: number): [number, number] {
+  if ((lines[n - 1] ?? '').trim() === '') return [n, n]
+  let start = n
+  let end = n
+  while (start > 1 && (lines[start - 2] ?? '').trim() !== '') start--
+  while (end < lines.length && (lines[end] ?? '').trim() !== '') end++
+  return [start, end]
+}
+
+// Where an image link points on disk, read from the document's folder (the
+// working directory for a draft); web images have no preview
+async function imagePath($: EngineInterface, doc: Doc, src: string): Promise<string | null> {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null
+  if (src.startsWith('/') || src.startsWith('~/')) return absolute($, src)
+  return (await assetsDir($, doc)) + '/' + decodeURI(src).replace(/^\.\//, '')
+}
+
+async function pixelsAvailable($: EngineInterface): Promise<boolean> {
+  const program = ((await $.env.get('TERM_PROGRAM')) ?? '').toLowerCase()
+  return ['ghostty', 'wezterm'].includes(program) || ((await $.env.get('TERM')) ?? '').includes('kitty')
+}
+
+// Previews by file, size and mode; an edited image has a new mtime, so a new key
+const previewCache = new Map<string, Promise<Preview | null>>()
+
+// The preview of the image at `path`, or null when it can't be read. macOS
+// sips measures and decodes it, so any format sips reads works
+async function previewOf($: EngineInterface, path: string, columns: number, maxRows: number, pixels: boolean) {
+  const stat = await $.fs.stat(path).catch(() => null)
+  if (!stat || stat.kind !== 'file') return null
+  const key = [path, stat.mtimeMs, columns, maxRows, pixels].join('|')
+  let made = previewCache.get(key)
+  if (!made) {
+    // A redraw that starts while sips runs aborts it; forget the failure so
+    // the next redraw tries again
+    made = makePreview($, path, stat.mtimeMs, columns, maxRows, pixels).catch(err => {
+      previewCache.delete(key)
+      if (!String(err).includes('aborted')) $.ui.log(`md: no preview for ${path}: ${String(err)}`)
+      return null
+    })
+    previewCache.set(key, made)
+  }
+  return made
+}
+
+async function makePreview($: EngineInterface, path: string, mtimeMs: number, columns: number, maxRows: number, pixels: boolean): Promise<Preview | null> {
+  const info = await $.process.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', path])
+  const width = Number(/pixelWidth:\s*(\d+)/.exec(info.stdout)?.[1])
+  const height = Number(/pixelHeight:\s*(\d+)/.exec(info.stdout)?.[1])
+  if (!width || !height) return null
+  const fit = fitRows(width, height, columns, maxRows)
+  const tmp = `/tmp/md-preview-${hash(`${path}|${mtimeMs}|${fit.columns}|${fit.rows}`)}`
+  if (pixels) {
+    let file = path
+    if (!/\.png$/i.test(path)) {
+      file = tmp + '.png'
+      if ((await $.process.run(['sips', '-s', 'format', 'png', path, '--out', file])).exitCode !== 0) return null
+    }
+    return { kind: 'pixels', file, generation: Math.round(mtimeMs), ...fit }
+  }
+  const out = tmp + '.bmp'
+  const size = ['--resampleHeightWidth', String(fit.rows * 2), String(fit.columns)]
+  if ((await $.process.run(['sips', '-s', 'format', 'bmp', ...size, path, '--out', out])).exitCode !== 0) return null
+  const { base64 } = await $.fs.read(out, { as: 'bytes' })
+  const bmp = decodeBmp(Uint8Array.fromBase64(base64))
+  return { kind: 'cells', cells: halfBlocks(bmp.rgba, bmp.width, bmp.height), ...fit }
+}
+
+type PaneElements = ReturnType<EngineInterface['ui']['resolve']>
+
+function drawPreview(E: PaneElements, key: string, p: Preview, alt: string) {
+  const { Image, Raster } = E as unknown as {
+    Image: (props: Record<string, unknown>) => ReturnType<PaneElements['Text']>
+    Raster: (props: Record<string, unknown>) => ReturnType<PaneElements['Text']>
+  }
+  return p.kind === 'pixels'
+    ? <Image key={key} source={{ file: p.file, format: 'png', generation: p.generation }} columns={p.columns} rows={p.rows} alt={alt || 'image'} />
+    : <Raster key={key} columns={p.columns} rows={p.rows} cells={p.cells} />
+}
+
 function lineStyle(line: string, inFence: boolean): { color?: string; bold?: boolean; dimColor?: boolean; italic?: boolean } {
   if (line.trimStart().startsWith('```')) return { dimColor: true }
   if (inFence) return { color: 'cyan' }
   if (/^#{1,6}\s/.test(line)) return { bold: true, color: 'magenta' }
-  if (/^\s*>/.test(line)) return { italic: true, dimColor: true }
-  if (/^\s*([-*+]|\d+\.)\s/.test(line)) return { color: 'blue' }
+  if (/^\s*>/.test(line)) return { italic: true }
   return {}
 }
 
@@ -594,7 +775,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'md',
       description: 'Open a markdown file in the review pane, or save the draft there with /md save <path>',
-      argumentHint: '[path | save <path>]',
+      argumentHint: '[path | new [name] | save <path>]',
       immediate: true,
     })
     return next(e)
@@ -614,6 +795,11 @@ export const register: Register = on => {
     }
     if (!args) {
       await showPicker($)
+      return {}
+    }
+    const fresh = /^new(?:\s+(.+))?$/.exec(args)
+    if (fresh) {
+      await newFile($, fresh[1] ?? '')
       return {}
     }
     try {
@@ -921,7 +1107,13 @@ export const register: Register = on => {
             submitLabel="open"
             autoFocus
             onInput={v => void update($, pickerAtom, p => p && { ...p, filter: v })}
-            onSubmit={v => void openPicked($, matches.length ? (matches[0] ?? null) : v.trim())}
+            onSubmit={v => void (matches.length ? openPicked($, matches[0] ?? null) : newFile($, v))}
+          />
+          <Button
+            key="pick-new"
+            label={picker.filter.trim() ? `+ New file ${markdownName(picker.filter)}` : '+ New file'}
+            plain
+            onPress={() => void newFile($, picker.filter)}
           />
           {matches.map((f, i) => (
             <Button
@@ -931,7 +1123,7 @@ export const register: Register = on => {
               onPress={() => void openPicked($, f)}
             />
           ))}
-          {matches.length === 0 && <Text dimColor>No markdown files match. Enter opens what you typed as a path.</Text>}
+          {matches.length === 0 && <Text dimColor>No markdown files match. Enter creates {markdownName(picker.filter)}.</Text>}
           <Button
             key="pick-cancel"
             label="cancel"
@@ -968,6 +1160,9 @@ export const register: Register = on => {
       return span ? [{ s, span }] : []
     })
     const suggestedHere = suggested.filter(({ span }) => span[0].line <= cursor && cursor <= span[1].line)
+    const focus = await read($, focusAtom)
+    const pixels = await pixelsAvailable($)
+    const words = countWords(doc.lines.join('\n'))
     const bodyRows = e.props.scroll.bodyRows || 20
     const page = Math.max(5, bodyRows - 8)
 
@@ -991,7 +1186,8 @@ export const register: Register = on => {
       <Box flexDirection="row" columnGap={2}>
         <Text bold wrap="truncate-start">{doc.path ? relative(doc.path, cwd) : docName(null)}</Text>
         <Text dimColor>
-          {excerpt ? `“${short(excerpt, 24)}”` : `${cursor}:${col + 1}`} · {open.length} open
+          {excerpt ? `“${short(excerpt, 24)}” · ${countWords(excerpt)} of ${words} words` : `${cursor}:${col + 1} · ${words} words`} ·{' '}
+          {open.length} open
           {changed.size > 0 ? ` · ${changed.size} changed` : ''}
           {suggested.length > 0 ? ` · ${suggested.length} suggested` : ''}
           {doc.path === null ? (writing ? ' · ✎ Claude is writing…' : ' · unsaved, /md save <path>') : ''}
@@ -1007,6 +1203,12 @@ export const register: Register = on => {
           {key('f', 'pg↓', () => move(cursor + page))}
           {key('b', 'pg↑', () => move(cursor - page))}
           {key('v', mark ? 'clear' : 'select', () => update($, markAtom, m => (m ? null : { line: cursor, col })))}
+          {key('o', 'copy', () => copyOut($))}
+          {key('i', 'image', () => pasteImage($))}
+          {key('z', focus ? 'unfocus' : 'focus', async () => {
+            await update($, focusAtom, v => !v)
+            await keepVisible($)
+          })}
           {key('n', 'next', nextComment)}
           {key('r', 'read', async () => {
             const blocks = blocksOf(doc.lines)
@@ -1073,12 +1275,28 @@ export const register: Register = on => {
       head: `✎ Claude suggests (${rangeLabel(span[0].line, span[1].line)}): ${s.text || '(delete it)'}`,
       note: s.note ? `  ${s.note}` : '',
     }))
-    const threadRows = Math.min(
+    const caretImage = imageOfLine(doc.lines[cursor - 1] ?? '')
+    const caretImagePath = caretImage ? await imagePath($, doc, caretImage.src) : null
+    const caretPreview = caretImagePath
+      ? await previewOf($, caretImagePath, Math.min(60, cols - 2), Math.max(4, Math.min(14, Math.floor(bodyRows / 3))), pixels)
+      : null
+    const previewRows = caretPreview ? caretPreview.rows + 1 : caretImage ? 1 : 0
+    const threadRows = previewRows + Math.min(
       Math.floor(bodyRows / 2),
       proposals.reduce((n, t) => n + rowsOf(t.head) + 1, 0) +
         shown.reduce((n, t) => n + rowsOf(t.head) + (t.reply ? rowsOf(t.reply) : 0), 0),
     )
     const thread = [
+      ...(caretImage
+        ? [
+            <Box key="caret-image" flexDirection="column">
+              {caretPreview && drawPreview(E, 'caret-image', caretPreview, caretImage.alt)}
+              <Text dimColor wrap="truncate-end">
+                {caretPreview ? `${caretImage.alt || 'image'} · ${caretImage.src}` : `No preview for ${caretImage.src}`}
+              </Text>
+            </Box>,
+          ]
+        : []),
       ...proposals.map(({ s, head, note }) => (
         <Box key={'s-' + s.id} flexDirection="column">
           <Text color="magenta" wrap="wrap">{head}</Text>
@@ -1138,11 +1356,20 @@ export const register: Register = on => {
       const visible: number[] = []
       const drawn: number[] = []
       let used = 0
+      // A paragraph that is only an image draws the picture, sized to its shape
+      const pictures = new Map<number, { alt: string; src: string; preview: Preview | null }>()
       for (let i = at; i < blocks.length; i++) {
         const b = blocks[i]
         if (!b) break
+        const image = b.kind === 'text' && b.start === b.end ? imageOfLine(b.text) : null
+        if (image) {
+          const path = await imagePath($, doc, image.src)
+          const maxRows = Math.max(4, Math.floor(budget * 0.6))
+          pictures.set(i, { ...image, preview: path ? await previewOf($, path, measure - 2, maxRows, pixels) : null })
+        }
+        const picture = pictures.get(i)
         const noteRows = notesOn(b.start, b.end).reduce((n, c) => n + Math.ceil((c.text.length + 12) / measure), 0)
-        const need = rowsOfBlock(b, measure - 2) + noteRows
+        const need = (picture?.preview ? picture.preview.rows + 2 : rowsOfBlock(b, measure - 2)) + noteRows
         if (used > budget * 2) break
         if (drawn.length === 0 || used + need <= budget) visible.push(i)
         drawn.push(i)
@@ -1177,7 +1404,16 @@ export const register: Register = on => {
                   }}
                 />
               </Box>
-              <Box width={measure - 2} flexDirection="column">{blockBody(E, b, measure - 2)}</Box>
+              <Box width={measure - 2} flexDirection="column">
+                {pictures.get(i)?.preview ? (
+                  <Box flexDirection="column" alignItems="center">
+                    {drawPreview(E, 'pic-' + b.start, pictures.get(i)?.preview as Preview, pictures.get(i)?.alt ?? '')}
+                    <Text dimColor italic wrap="truncate-end">{pictures.get(i)?.alt || pictures.get(i)?.src}</Text>
+                  </Box>
+                ) : (
+                  blockBody(E, b, measure - 2)
+                )}
+              </Box>
             </Box>
             {notes.map(c => (
               <Box key={'n-' + c.id} flexDirection="column" paddingLeft={4} width={measure}>
@@ -1255,6 +1491,7 @@ export const register: Register = on => {
             {key('n', '§↓', () => goHeading(1))}
             {key('p', '§↑', () => goHeading(-1))}
             {key('t', toc ? 'text' : 'contents', () => update($, tocAtom, v => !v))}
+            {key('o', 'copy', () => copyOut($))}
             {key('c', 'note', pick('comment'))}
             {key('a', 'ask', pick('ask'))}
             {key('r', 'review', () => update($, readerAtom, () => false))}
@@ -1265,8 +1502,12 @@ export const register: Register = on => {
     }
 
     const width = String(total).length
-    const gutterWidth = width + 3
-    const textWidth = Math.max(10, cols - gutterWidth - 1)
+    // Prose reads best around 72 columns, so a wide pane centers the text
+    // rather than stretching it, as the reader view does
+    const textWidth = Math.max(10, Math.min(72, cols - (width + 3) - 1))
+    const indent = Math.max(0, Math.floor((cols - (width + 3) - textWidth - 1) / 2))
+    const gutterWidth = indent + width + 3
+    const focused = focus ? paragraphAround(doc.lines, cursor) : null
     const room = Math.max(3, bodyRows - 6 - (threadRows ? threadRows + 1 : 0) - (input ? 1 : 0) - (stale ? 1 : 0))
     layout = { textWidth, room }
     const viewTop = Math.max(1, Math.min(total, await read($, viewTopAtom)))
@@ -1280,6 +1521,7 @@ export const register: Register = on => {
       const line = doc.lines[n - 1] ?? ''
       const isFence = line.trimStart().startsWith('```')
       const style = lineStyle(line, inFence && !isFence)
+      const lineSpans = inFence || isFence ? [] : inlineSpans(line)
       if (isFence) inFence = !inFence
       const notes = comments.filter(c => c.status !== 'resolved' && c.start <= n && n <= c.end)
       const noted = notes.length > 0
@@ -1302,28 +1544,39 @@ export const register: Register = on => {
         const a = lineSel ? Math.max(lineSel[0], piece.start) : 0
         const b = lineSel ? Math.min(lineSel[1], piece.end) : 0
         const caretHere = n === cursor && col >= piece.start && (col < piece.end || (isLast && col === line.length))
+        // Line columns [from, to) as this piece's own
+        const clip = (from: number, to: number): [number, number] | null => {
+          const x = Math.max(from, piece.start)
+          const y = Math.min(to, piece.end)
+          return x < y ? [x - piece.start, y - piece.start] : null
+        }
         editorRows.push({
           line: n,
           start: piece.start,
           text: line.slice(piece.start, piece.end),
           isLast,
           gutter:
-            k === 0
+            ' '.repeat(indent) +
+            (k === 0
               ? (isSuggested ? '✎' : byClaude ? '◆' : noted ? '●' : isChanged ? '+' : ' ') +
                 String(n).padStart(width) +
                 (n === cursor ? '▸' : ' ') +
                 '│'
-              : ' '.repeat(width + 2) + '│',
+              : ' '.repeat(width + 2) + '│'),
           gutterColor:
             k === 0 ? (isSuggested ? 'magenta' : byClaude ? 'cyan' : noted ? 'yellow' : isChanged ? 'green' : null) : null,
           style,
           isCaretLine: n === cursor,
           sel: lineSel && a < b ? [a - piece.start, b - piece.start] : null,
-          struck: struckCols.flatMap(([from, to]): [number, number][] => {
-            const x = Math.max(from, piece.start)
-            const y = Math.min(to, piece.end)
-            return x < y ? [[x - piece.start, y - piece.start]] : []
+          struck: struckCols.flatMap(([from, to]) => {
+            const c = clip(from, to)
+            return c ? [c] : []
           }),
+          spans: lineSpans.flatMap(([from, to, kind]) => {
+            const c = clip(from, to)
+            return c ? [[c[0], c[1], kind] as [number, number, typeof kind]] : []
+          }),
+          dim: focused !== null && (n < focused[0] || n > focused[1]),
           caret: caretHere ? col - piece.start : null,
         })
       })

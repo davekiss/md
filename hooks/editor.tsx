@@ -1,6 +1,18 @@
 import type { ClientModule } from 'claude-code'
 
-type Style = { color?: string; bold?: boolean; dimColor?: boolean; italic?: boolean }
+type Style = { color?: string; bold?: boolean; dimColor?: boolean; italic?: boolean; underline?: boolean }
+
+type SpanKind = 'mark' | 'bold' | 'italic' | 'code' | 'link' | 'bullet'
+
+// Markdown syntax recedes; the words it marks take their meaning's style
+const SPAN_STYLE: Record<SpanKind, Style> = {
+  mark: { dimColor: true },
+  bold: { bold: true },
+  italic: { italic: true },
+  code: { color: '#d7a86e' },
+  link: { color: '#82aaff', underline: true },
+  bullet: { color: 'magenta' },
+}
 
 // One screen row: a wrapped piece of a line, with what to highlight in it
 export type EditorRow = {
@@ -18,6 +30,10 @@ export type EditorRow = {
   sel: [number, number] | null
   /** Piece columns [from, to) a suggested change would replace */
   struck: [number, number][]
+  /** Piece columns [from, to) of styled markdown: emphasis, code, links, syntax */
+  spans: [number, number, SpanKind][]
+  /** Outside the paragraph in focus */
+  dim: boolean
   /** Piece column the caret sits on */
   caret: number | null
 }
@@ -53,7 +69,7 @@ const Editor: ClientModule<EditorProps> = (props, surface) => {
   return (
     <Box flexDirection="column">
       {rows.map((r, i) => {
-        const parts: { text: string; selected: boolean; caret: boolean; struck: boolean }[] = []
+        const parts: { text: string; selected: boolean; caret: boolean; struck: boolean; style: Style }[] = []
         const text = r.text
         // Split the piece where the selection and the caret begin and end
         const cuts = new Set([0, text.length])
@@ -63,7 +79,8 @@ const Editor: ClientModule<EditorProps> = (props, surface) => {
         }
         // Absent while a reload has the hooks one version behind this module
         const struck = r.struck ?? []
-        for (const [a, b] of struck) {
+        const spans = r.spans ?? []
+        for (const [a, b] of [...struck, ...spans]) {
           cuts.add(a)
           cuts.add(b)
         }
@@ -80,6 +97,7 @@ const Editor: ClientModule<EditorProps> = (props, surface) => {
             selected: r.sel !== null && from >= r.sel[0] && to <= r.sel[1],
             caret: r.caret === from,
             struck: struck.some(([a, b]) => from >= a && to <= b),
+            style: Object.assign({}, ...spans.filter(([a, b]) => from >= a && to <= b).map(([, , kind]) => SPAN_STYLE[kind])),
           })
         }
         // A caret at the end of the line sits on a space after it
@@ -89,7 +107,7 @@ const Editor: ClientModule<EditorProps> = (props, surface) => {
             <Text color={r.gutterColor ?? undefined} dimColor={!r.gutterColor && !r.isCaretLine}>
               {r.gutter}
             </Text>
-            <Text {...r.style} wrap="truncate-end">
+            <Text {...r.style} {...(r.dim ? { dimColor: true } : {})} wrap="truncate-end">
               {parts.map((p, k) =>
                 p.caret ? (
                   <Text key={'p' + k} inverse>{p.text}</Text>
@@ -98,7 +116,7 @@ const Editor: ClientModule<EditorProps> = (props, surface) => {
                 ) : p.struck ? (
                   <Text key={'p' + k} strikethrough color="magenta">{p.text}</Text>
                 ) : (
-                  p.text
+                  <Text key={'p' + k} {...p.style}>{p.text}</Text>
                 ),
               )}
               {caretAtEnd ? <Text inverse> </Text> : ''}
