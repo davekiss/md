@@ -36,8 +36,8 @@ md gives the text a place to stay. Claude writes the draft into a pane, and you 
 ## Get started
 
 ```
-/plugin marketplace add davekiss/md
-/plugin install md@md
+/plugin marketplace add davekiss/cc-plugins
+/plugin install md@davekiss
 ```
 
 Then ask Claude to draft something in the pane, or type `/md` to pick a file.
@@ -54,7 +54,7 @@ Drag across a phrase, then press **ctrl+j** to ask Claude about it or **ctrl+k**
 
 ### Claude suggests, you decide
 
-For your prose, Claude proposes changes instead of making them. The old text is struck through in place and the new text waits underneath. Accept or reject it with a click, or press **Tab** and then **y** or **d**. When you ask for a change outright, Claude makes it directly. Either way it's marked in the gutter and **u** undoes it.
+For your prose, Claude proposes changes instead of making them. The old text is struck through in place and the new text waits underneath. Accept or reject it with a click, or press **Tab** to land on accept, then **y** or **d**. When you ask for a change outright, Claude makes it directly. Either way it's marked in the gutter and **u** undoes it.
 
 ### Made for reading what you wrote
 
@@ -88,7 +88,7 @@ In the text, type to edit. Click to place the caret and drag to select.
 |---|---|
 | ctrl+j | Ask Claude about the selection |
 | ctrl+k | Comment on the selection |
-| ctrl+z | Undo |
+| ctrl+u | Undo (ctrl+z suspends Claude Code) |
 | cmd+v | Paste text. A dragged-in image file becomes an image link. |
 | ctrl+v | Paste the image on the clipboard: saved to `assets/` and linked (macOS) |
 | Tab | Move to the pane's buttons |

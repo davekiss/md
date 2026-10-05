@@ -65,6 +65,19 @@ let layout = { textWidth: 60, room: 20 }
 // Where a drag started, so the selection runs from there
 let dragFrom: Pos | null = null
 
+// The editor's rows as last drawn, to map a click's cell to a line and column
+let drawn: { rows: EditorRow[]; gutterWidth: number } = { rows: [], gutterWidth: 0 }
+
+function cellPos(x: number, y: number): Pos | null {
+  const { rows, gutterWidth } = drawn
+  const row = rows[Math.max(0, Math.min(rows.length - 1, y))]
+  if (!row) return null
+  // Above or below the text clamps to its first or last row
+  if (y < 0) return { line: row.line, col: row.start }
+  const end = row.isLast ? row.text.length : Math.max(0, row.text.length - 1)
+  return { line: row.line, col: row.start + Math.min(Math.max(0, x - gutterWidth), end) }
+}
+
 // Earlier states of the file, newest last, for undo
 const undoStack: { lines: string[]; caret: Pos }[] = []
 
@@ -501,11 +514,17 @@ async function editorKey($: EngineInterface, k: { key: string; shift: boolean; c
     case 'return':
       return edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, '\n')
     case 'tab':
-      return edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, '  ')
+      // To the pane's buttons: accept on a suggested change, else the toolbar
+      return $.ui
+        .focus({ requestId: PANE, key: (await suggestionAtCaret($)) ? 'k-y' : 'k-c' })
+        .then(r => r.deny)
+        .catch(String)
+        .then(denied => void (denied && $.ui.toast('Press Esc, then Tab, for the pane’s buttons.')))
     case 'space':
       return edit($, sel?.[0] ?? caret, sel?.[1] ?? caret, ' ')
   }
-  if ((k.ctrl || k.meta) && k.key === 'z') return undo($)
+  // ctrl+z never arrives: Claude Code takes it to suspend itself
+  if ((k.ctrl && ['u', '_', '/'].includes(k.key)) || (k.meta && k.key === 'z')) return undo($)
   if (k.ctrl && k.key === 'v') return pasteImage($)
   if (k.ctrl || k.meta) return
   // A printable character
@@ -1063,16 +1082,19 @@ export const register: Register = on => {
   // Clicks, drags and keys from the editor, applied one at a time
   on('ui.message', { requestId: PANE }, async ($, e) => {
     const m = e.data as
-      | { type: 'down'; line: number; col: number; shift: boolean }
-      | { type: 'drag'; line: number; col: number }
+      | { type: 'down'; x: number; y: number; shift: boolean }
+      | { type: 'drag'; x: number; y: number }
       | { type: 'key'; key: string; shift: boolean; ctrl: boolean; meta: boolean }
     const run = async () => {
       if (m.type === 'down') {
-        dragFrom = m.shift ? null : { line: m.line, col: m.col }
-        await placeCaret($, { line: m.line, col: m.col }, m.shift)
+        const p = cellPos(m.x, m.y)
+        if (!p) return
+        dragFrom = m.shift ? null : p
+        await placeCaret($, p, m.shift)
       } else if (m.type === 'drag') {
+        const p = cellPos(m.x, m.y)
+        if (!p) return
         if (dragFrom && (await read($, markAtom)) === null) await update($, markAtom, () => dragFrom)
-        const p = { line: m.line, col: m.col }
         await update($, cursorAtom, () => p.line)
         await update($, colAtom, () => p.col)
       } else if (m.type === 'key') {
@@ -1581,13 +1603,14 @@ export const register: Register = on => {
         })
       })
     }
+    drawn = { rows: editorRows, gutterWidth }
     const rows = <Client key="editor" module="./editor.tsx" width={cols} props={{ rows: editorRows, gutterWidth }} />
 
     return (
       <Box flexDirection="column">
         {header}
         {toolbar}
-        <Text dimColor>Click to place the caret, drag to select, type to edit · ctrl+k comment, ctrl+j ask</Text>
+        <Text dimColor>Click to place the caret, drag to select, type to edit · ctrl+k comment, ctrl+j ask, ctrl+u undo, tab to buttons</Text>
         {rows}
         {stale > 0 && <Text dimColor>{stale} comment(s) lost their lines after an edit.</Text>}
         {thread.length > 0 && <Text dimColor>{'─'.repeat(cols)}</Text>}

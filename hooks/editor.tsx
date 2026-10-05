@@ -41,28 +41,16 @@ export type EditorRow = {
 export type EditorProps = { rows: EditorRow[]; gutterWidth: number }
 
 // The review view's text. It draws the caret and the selection the hooks module
-// holds, and reports where each click, drag and key lands as a line and column.
+// holds, and reports the cell each click and drag lands on and each key.
 const Editor: ClientModule<EditorProps> = (props, surface) => {
   const { Box, Text } = surface.elements
-  const { rows, gutterWidth } = props
+  const { rows } = props
 
-  const at = (x: number, y: number) => {
-    const row = rows[Math.max(0, Math.min(rows.length - 1, y))]
-    if (!row) return null
-    // Above or below the text clamps to its first or last row
-    if (y < 0) return { line: row.line, col: row.start }
-    const offset = Math.max(0, x - gutterWidth)
-    const end = row.isLast ? row.text.length : Math.max(0, row.text.length - 1)
-    return { line: row.line, col: row.start + Math.min(offset, end) }
-  }
-
-  // Set on every draw (each call replaces the last) so positions match the rows drawn now
+  // Sends the cell, not a line and column: the hooks map it with the rows they
+  // drew last, which a listener set on an earlier draw may not have seen
   surface.onPointer(ev => {
-    if (ev.button !== 'left' && ev.type !== 'move') return
-    const pos = at(ev.x, ev.y)
-    if (!pos) return
-    if (ev.type === 'down') surface.post({ type: 'down', ...pos, shift: ev.shift === true })
-    else if (ev.type === 'move' && ev.button === 'left') surface.post({ type: 'drag', ...pos })
+    if (ev.type === 'down' && ev.button === 'left') surface.post({ type: 'down', x: ev.x, y: ev.y, shift: ev.shift === true })
+    else if (ev.type === 'move' && ev.button === 'left') surface.post({ type: 'drag', x: ev.x, y: ev.y })
   })
   surface.onKey(ev => surface.post({ type: 'key', key: ev.key, shift: ev.shift === true, ctrl: ev.ctrl === true, meta: ev.meta === true }))
 
